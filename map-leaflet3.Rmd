@@ -1,0 +1,185 @@
+---
+title: "map-leaflet2"
+author: "Jonas"
+date: "2025-05-21"
+output: html_document
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, echo=FALSE}
+# This is a Shiny time series map web application
+library(shiny)
+library(tidyverse)
+library(leaflet)
+library(lubridate)
+```
+
+```{r file, echo=FALSE}
+# Read the CSV file - replace with your actual file path
+algae_data <- read_delim(file = "C:\\Users\\jonas\\Documents\\uni\\TM\\SP\\map-script\\obs_algues_export_2025-01.csv",
+                         delim = ';',
+                         locale = locale(encoding = "ASCII"))
+```
+
+```{r basic-data}
+# Clean and prepare the data
+# Select only the necessary columns
+df <- algae_data %>%
+  mutate(
+    Latitude = ifelse(!is.na(`loc-point-Latitude`), 
+                     `loc-point-Latitude`, 
+                     `loc-point_auto_5-Latitude`),
+    Longitude = ifelse(!is.na(`loc-point-Longitude`), 
+                      `loc-point-Longitude`, 
+                      `loc-point_auto_5-Longitude`)
+  ) %>%
+  # Filter out rows with missing coordinates
+  filter(!is.na(Latitude) & !is.na(Longitude)) %>%
+  # Select relevant columns for mapping
+  select(`groupe-date_heure`, Latitude, Longitude, `obs-bloom`, `contexte-nom_lac`)
+
+names(df) = c("Date", "lat", "lon", "bloom", "nomlac")
+df$Date <- as.Date(df$Date)
+df$year <- year(df$Date)
+df$month <- month(df$Date, label = TRUE, abbr = FALSE)
+df$week <- week(df$Date)
+head(df)
+```
+
+```{r shiny-app}
+# UI
+ui <- fluidPage(
+  titlePanel("Algae Observations Time Series Map"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      # radioButtons(
+      #   inputId = "Frequency",
+      #   label = "Select Time Series Frequency",
+      #   choices = c(
+      #     "Daily" = "days",
+      #     "Weekly" = "weeks", 
+      #     "Monthly" = "months",
+      #     "Yearly" = "years"
+      #   ),
+      #   selected = "weeks",
+      #   inline = TRUE
+      # ),
+      
+      # Date range slider
+      uiOutput("Time_Series_UI"),
+      
+      # Display information about filtered data
+      # verbatimTextOutput("data_info")
+    ),
+    
+    mainPanel(
+      leafletOutput("Time_Series_Map", height = "600px")
+    )
+  )
+)
+
+# Server logic
+server <- function(input, output, session) {
+  
+  # Render date range slider
+  output$Time_Series_UI <- renderUI({
+    if(nrow(df) > 0) {
+      sliderInput("date_range", 
+                  "Select Date Range:", 
+                  min = min(df$Date, na.rm = TRUE), 
+                  max = max(df$Date, na.rm = TRUE), 
+                  value = c(min(df$Date, na.rm = TRUE), max(df$Date, na.rm = TRUE)),
+                  timeFormat = "%Y-%m-%d",
+                  # step = switch(input$Frequency,
+                  #   "days" = 1,
+                  #   "weeks" = 7,
+                  #   "months" = 30,
+                  #   "years" = 365
+                  # ),
+                  step = 1,
+                  animate = animationOptions(interval = 1000, loop = FALSE))
+    }
+  })
+  
+  # Filter data based on date range selection
+  filtered_data <- reactive({
+    req(input$date_range)
+    
+    df %>%
+      filter(Date >= input$date_range[1] & Date <= input$date_range[2]) %>%
+      filter(!is.na(lat) & !is.na(lon))
+  })
+  
+  # Display information about filtered data
+  output$data_info <- renderText({
+    if(!is.null(filtered_data())) {
+      paste("Showing", nrow(filtered_data()), "observations",
+            "\nDate range:", input$date_range[1], "to", input$date_range[2])
+    }
+  })
+  
+  # Create the base leaflet map
+  output$Time_Series_Map <- renderLeaflet({
+    leaflet() %>%
+      addProviderTiles(providers$OpenStreetMap) %>%
+      setView(lng = mean(df$lon, na.rm = TRUE), 
+              lat = mean(df$lat, na.rm = TRUE), 
+              zoom = 8)
+  })
+  
+  # Update map markers based on filtered data
+  observe({
+    req(filtered_data())
+    
+    data <- filtered_data()
+    
+    if(nrow(data) > 0) {
+      # Create color palette based on bloom status
+      bloom_colors <- colorFactor(
+        palette = c("blue", "orange", "red"),
+        domain = c("no", "possible", "yes"),
+        na.color = "gray"
+      )
+      
+      leafletProxy("Time_Series_Map") %>%
+        clearMarkers() %>%
+        addCircleMarkers(
+          data = data,
+          lng = ~lon, 
+          lat = ~lat,
+          radius = 6,
+          color = ~bloom_colors(bloom),
+          fillOpacity = 0.7,
+          stroke = TRUE,
+          weight = 1,
+          popup = ~paste(
+            "<strong>Lake:</strong>", nomlac, "<br>",
+            "<strong>Date:</strong>", Date, "<br>",
+            "<strong>Bloom Status:</strong>", bloom, "<br>",
+            "<strong>Coordinates:</strong>", round(lat, 4), ",", round(lon, 4)
+          )
+        ) %>%
+        addLegend(
+          position = "bottomright",
+          pal = bloom_colors,
+          values = data$bloom,
+          title = "Bloom Status",
+          opacity = 0.7,
+          layerId = "bloom_legend"
+        )
+    } else {
+      leafletProxy("Time_Series_Map") %>%
+        clearMarkers() %>%
+        removeControl("bloom_legend")
+    }
+  })
+}
+
+# Run the application
+shinyApp(ui = ui, server = server)
+```
