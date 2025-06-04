@@ -1,0 +1,284 @@
+---
+title: "map-leaflet2"
+author: "Jonas"
+date: "2025-05-21"
+output: html_document
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, echo=FALSE}
+# This is a Shiny time series map web application
+library(shiny)
+library(tidyverse)
+library(leaflet)
+library(lubridate)
+```
+
+```{r file, echo=FALSE}
+# Read the CSV file - replace with your actual file path
+algae_data <- read_delim(file = "C:\\Users\\jonas\\Documents\\uni\\TM\\SP\\map-script\\obs_algues_export_2025-01.csv",
+                         delim = ';',
+                         locale = locale(encoding = "ASCII"))
+```
+
+```{r basic-data}
+# Clean and prepare the data
+# Select only the necessary columns
+df <- algae_data %>%
+  mutate(
+    Latitude = ifelse(!is.na(`loc-point-Latitude`), 
+                     `loc-point-Latitude`, 
+                     `loc-point_auto_5-Latitude`),
+    Longitude = ifelse(!is.na(`loc-point-Longitude`), 
+                      `loc-point-Longitude`, 
+                      `loc-point_auto_5-Longitude`)
+  ) %>%
+  # Filter out rows with missing coordinates
+  filter(!is.na(Latitude) & !is.na(Longitude)) %>%
+  # Select relevant columns for mapping
+  select(`groupe-date_heure`, Latitude, Longitude, `obs-bloom`, `contexte-nom_lac`)
+
+names(df) = c("Date", "lat", "lon", "bloom", "nomlac")
+df$Date <- as.Date(df$Date)
+df$year <- year(df$Date)
+df$month <- month(df$Date, label = TRUE, abbr = FALSE)
+df$week <- week(df$Date)
+head(df)
+```
+
+```{r shiny-app}
+# UI
+ui <- fluidPage(
+  titlePanel("Carte temporelle des observations d'algues"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      # radioButtons(
+      #   inputId = "Frequency",
+      #   label = "Select Time Series Frequency",
+      #   choices = c(
+      #     "Daily" = "days",
+      #     "Weekly" = "weeks", 
+      #     "Monthly" = "months",
+      #     "Yearly" = "years"
+      #   ),
+      #   selected = "weeks",
+      #   inline = TRUE
+      # ),
+      
+      # Date range slider
+      uiOutput("Time_Series_UI"),
+      
+      # Display information about filtered data
+      verbatimTextOutput("data_info")
+    ),
+    
+    mainPanel(
+      leafletOutput("Time_Series_Map", height = "600px")
+    )
+  )
+)
+
+# Server logic
+server <- function(input, output, session) {
+  
+  # Render date range slider
+  output$Time_Series_UI <- renderUI({
+    if(nrow(df) > 0) {
+      sliderInput("date_range", 
+                  "Sélectionner la plage de dates:", 
+                  min = min(df$Date, na.rm = TRUE), 
+                  max = max(df$Date, na.rm = TRUE), 
+                  value = c(min(df$Date, na.rm = TRUE), max(df$Date, na.rm = TRUE)),
+                  timeFormat = "%d-%m-%Y",
+                  # step = switch(input$Frequency,
+                  #   "days" = 1,
+                  #   "weeks" = 7,
+                  #   "months" = 30,
+                  #   "years" = 365
+                  # ),
+                  step = 1,
+                  animate = animationOptions(interval = 100, loop = FALSE))
+    }
+  })
+  
+  # Filter and aggregate data based on date range selection
+  filtered_data <- reactive({
+    req(input$date_range)
+    
+    # Filter by date range
+    filtered <- df %>%
+      filter(Date >= input$date_range[1] & Date <= input$date_range[2]) %>%
+      filter(!is.na(lat) & !is.na(lon))
+    
+    # Return empty tibble if no data
+    if(nrow(filtered) == 0) {
+      return(tibble(
+        lat_grouped = numeric(0),
+        lon_grouped = numeric(0), 
+        nomlac = character(0),
+        observation_count = numeric(0),
+        bloom_pct = numeric(0),
+        first_date = as.Date(character(0)),
+        last_date = as.Date(character(0)),
+        lat = numeric(0),
+        lon = numeric(0),
+        radius = numeric(0)
+      ))
+    }
+    
+    # Define margin for lat/lon grouping (approximately 300 meters)
+    lat_margin <- 0.003  # roughly 300m
+    lon_margin <- 0.003  # roughly 300m
+    
+    # Create grouped coordinates with margin
+    filtered <- filtered %>%
+      mutate(
+        lat_grouped = round(lat / lat_margin) * lat_margin,
+        lon_grouped = round(lon / lon_margin) * lon_margin
+      )
+    
+    # Aggregate by grouped location
+    aggregated <- filtered %>%
+      group_by(lat_grouped, lon_grouped, nomlac) %>%
+      summarise(
+        observation_count = n(),
+        # Calculate bloom statistics
+        bloom_pct = if_else(
+          observation_count > 0,
+          round((sum(bloom == "oui", na.rm = TRUE) / observation_count) * 100, 1),
+          0.0
+        ),
+        # Get date range for this location
+        first_date = min(Date, na.rm = TRUE),
+        last_date = max(Date, na.rm = TRUE),
+        # Use original coordinates for display (average of grouped points)
+        lat = mean(lat, na.rm = TRUE),
+        lon = mean(lon, na.rm = TRUE),
+        .groups = 'drop'
+      ) %>%
+      # Scale the radius based on observation count (min 4, max 20)
+      mutate(
+        radius = pmax(4, pmin(20, 4 + (observation_count - 1) * 2))
+      )
+    
+    return(aggregated)
+  })
+  
+  # Display information about filtered data
+  output$data_info <- renderText({
+    data <- filtered_data()
+    
+    if(is.null(data) || nrow(data) == 0) {
+      paste("Aucune observations dans l'intervalle sélectionné:",
+            if(!is.null(input$date_range)) paste(input$date_range[1], "to", input$date_range[2]) else "")
+    } else {
+      total_locations <- nrow(data)
+      total_observations <- sum(data$observation_count)
+      avg_bloom_pct <- round(mean(data$bloom_pct, na.rm = TRUE), 1)
+      
+      paste(total_observations, "observation(s) affichée(s)",
+            "à", total_locations, "lac(s).",
+            "\nPourcentage de bloom moyen:", avg_bloom_pct, "%",
+            "\nIntervalle sélectionné:", input$date_range[1], "à", input$date_range[2])
+    }
+  })
+  
+  # Create the base leaflet map
+  output$Time_Series_Map <- renderLeaflet({
+    leaflet() %>%
+      addProviderTiles(providers$OpenStreetMap) %>%
+      setView(lng = mean(df$lon, na.rm = TRUE), 
+              lat = mean(df$lat, na.rm = TRUE), 
+              zoom = 8)
+  })
+  
+  # Create the color palette for the legend
+  bloom_colors <- colorNumeric(
+    palette = colorRampPalette(c("blue", "green", "red"))(100),
+    domain = c(0, 100),
+    na.color = "gray"
+  )
+  
+  # Update map markers based on filtered data
+  observe({
+    req(filtered_data())
+    
+    data <- filtered_data()
+    
+    if(nrow(data) > 0) {
+      # Get range of observation counts for size legend
+      obs_range <- range(data$observation_count)
+      
+      leafletProxy("Time_Series_Map") %>%
+        clearMarkers() %>%
+        addCircleMarkers(
+          data = data,
+          lng = ~lon, 
+          lat = ~lat,
+          radius = ~radius,  # Use dynamic radius based on observation count
+          color = ~bloom_colors(bloom_pct),
+          fillOpacity = 0.7,
+          stroke = TRUE,
+          weight = 1,
+          popup = ~paste(
+            "<strong>Lac:</strong>", nomlac, "<br>",
+            "<strong>Nombre d'observations:</strong>", observation_count, "<br>",
+            "<strong>Pourcentage de blooms:</strong>", bloom_pct, "%<br>",
+            "<strong>Intervalle:</strong>", first_date, "à", last_date, "<br>",
+            "<strong>Coordonnées:</strong>", round(lat, 4), ",", round(lon, 4)
+          )
+        )
+    } else {
+      # Clear markers and legend when no data
+      leafletProxy("Time_Series_Map") %>%
+        clearMarkers() %>%
+        removeControl("bloom_legend")
+    }
+    
+    leafletProxy("Time_Series_Map") %>%
+    addLegend(
+      position = "bottomright",
+      pal = bloom_colors,
+      values = c(0, 100),
+      title = "Pourcentage de bloom",
+      opacity = 0.7,
+      layerId = "bloom_legend"
+    ) %>%
+    # Add custom HTML legend for circle sizes
+    addControl(
+      html = paste0(
+        '<div style="background: rgba(255,255,255,0.9); padding: 10px; border-radius: 5px; border: 1px solid #ccc;">',
+        '<h4 style="margin: 0 0 10px 0; font-size: 14px;">Nombre d\'observations</h4>',
+        '<div style="display: flex; flex-direction: column; gap: 5px;">',
+        # Create size examples
+        paste(
+          sapply(c(1, 3, 5, 8), function(count) {
+            radius <- pmax(4, pmin(20, 4 + (count - 1) * 2))
+            paste0(
+              '<div style="display: flex; align-items: center; gap: 8px;">',
+              '<svg width="', radius * 2, '" height="', radius * 2, '">',
+              '<circle cx="', radius, '" cy="', radius, '" r="', radius, '" ',
+              'fill="none" stroke="#666" stroke-width="2"/>',
+              '</svg>',
+              '<span style="font-size: 12px;">', count, ' obs</span>',
+              '</div>'
+            )
+          }),
+          collapse = ""
+        ),
+        '</div></div>'
+      ),
+      position = "bottomleft",
+      layerId = "size_legend"
+    )
+  })
+}
+
+# Run the application
+shinyApp(ui = ui, server = server)
+```

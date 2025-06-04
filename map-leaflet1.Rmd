@@ -127,10 +127,10 @@ map <- leaflet(data = aggregated_data) %>%
                   shape = 'circle', color = 'black', 
                   fillColor = ~colPal(bloom_percentage), fillOpacity = 0.7,
                   popup = ~paste(
-                    "<strong>Lake:</strong> ", `contexte-nom_lac`, "<br>",
-                    "<strong>Total Observations:</strong> ", total_observations, "<br>",
-                    "<strong>Observations with Blooms:</strong> ", bloom_observations, "<br>",
-                    "<strong>Bloom Percentage:</strong> ", bloom_percentage, "%"
+                    "<strong>Lac:</strong> ", `contexte-nom_lac`, "<br>",
+                    "<strong>Nombre d'observations:</strong> ", total_observations, "<br>",
+                    "<strong>Observations avec amas d'algues:</strong> ", bloom_observations, "<br>",
+                    "<strong>Pourcentage des observation avec algues:</strong> ", bloom_percentage, "%"
                   )) |>
   addLegend(
                   position = "topright",
